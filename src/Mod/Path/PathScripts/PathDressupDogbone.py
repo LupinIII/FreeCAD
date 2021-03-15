@@ -317,6 +317,10 @@ class Bone:
         self.smooth = Smooth.Neither
         self.F = F
 
+        self.style = False
+        self.enabled = True
+        self.accessible = True
+
         # initialized later
         self.cDist = None
         self.cAngle = None
@@ -387,6 +391,21 @@ class Bone:
         PathLog.debug("adaptive corner=%.2f * %.2f˚ -> bone=%.2f * %.2f˚" % (distance, theta, length, boneAngle))
         return length
 
+class BoneList:
+    def __init__(self):
+        self.bonesByLocation = dict()
+        self.bonesByNumber = dict()
+
+    def add(self, bone):
+        if bone.location() in self.bonesByLocation:
+            bone.style = self.bonesByLocation[bone.location()].style
+            #bone.enabled = self.bonesByLocation[bone.location()].enabled
+        self.bonesByLocation[bone.location()] = bone
+
+        self.bonesByNumber.clear()
+        for location, bone in self.bonesByLocation.items():
+            self.bonesByNumber[bone.boneId] = bone
+
 
 class ObjectDressup:
 
@@ -401,12 +420,14 @@ class ObjectDressup:
         obj.Style = Style.Dogbone
         obj.addProperty("App::PropertyIntegerList", "BoneBlacklist", "Dressup", QtCore.QT_TRANSLATE_NOOP("Path_DressupDogbone", "Bones that aren't dressed up"))
         obj.BoneBlacklist = []
-        obj.setEditorMode('BoneBlacklist', 2)  # hide this one
+        #obj.setEditorMode('BoneBlacklist', 2)  # hide this one
         obj.addProperty("App::PropertyEnumeration", "Incision", "Dressup", QtCore.QT_TRANSLATE_NOOP("Path_DressupDogbone", "The algorithm to determine the bone length"))
         obj.Incision = Incision.All
         obj.Incision = Incision.Adaptive
         obj.addProperty("App::PropertyFloat", "Custom", "Dressup", QtCore.QT_TRANSLATE_NOOP("Path_DressupDogbone", "Dressup length if Incision == custom"))
         obj.Custom = 0.0
+        obj.addProperty("App::PropertyPythonObject", "boneList", "Dressup", QtCore.QT_TRANSLATE_NOOP("Path_DressupDogbone", "Properties of individual dogbones"))
+        obj.boneList = BoneList()
         obj.Proxy = self
         obj.Base = base
 
@@ -418,9 +439,11 @@ class ObjectDressup:
         self.shapes = None
         self.boneId = None
         self.bones = None
+        self.boneList = BoneList()
 
     def onDocumentRestored(self, obj):
-        obj.setEditorMode('BoneBlacklist', 2)  # hide this one
+        #obj.setEditorMode('BoneBlacklist', 2)  # hide this one
+        pass
 
     def __getstate__(self):
         return None
@@ -659,14 +682,24 @@ class ObjectDressup:
         if enabled:
             if bone.obj.Style == Style.Dogbone:
                 return self.dogbone(bone)
-            if bone.obj.Style == Style.Tbone_H:
-                return self.tboneHorizontal(bone)
-            if bone.obj.Style == Style.Tbone_V:
-                return self.tboneVertical(bone)
-            if bone.obj.Style == Style.Tbone_L:
-                return self.tboneLongEdge(bone)
-            if bone.obj.Style == Style.Tbone_S:
-                return self.tboneShortEdge(bone)
+            if bone.style == False:
+                if bone.obj.Style == Style.Tbone_H:
+                    return self.tboneHorizontal(bone)
+                if bone.obj.Style == Style.Tbone_V:
+                    return self.tboneVertical(bone)
+                if bone.obj.Style == Style.Tbone_L:
+                    return self.tboneLongEdge(bone)
+                if bone.obj.Style == Style.Tbone_S:
+                    return self.tboneShortEdge(bone)
+            else:
+                if bone.obj.Style == Style.Tbone_H:
+                    return self.tboneVertical(bone)
+                if bone.obj.Style == Style.Tbone_V:
+                    return self.tboneHorizontal(bone)
+                if bone.obj.Style == Style.Tbone_L:
+                    return self.tboneShortEdge(bone)
+                if bone.obj.Style == Style.Tbone_S:
+                    return self.tboneLongEdge(bone)
         else:
             return [bone.lastCommand, bone.outChord.g1Command(bone.F)]
 
@@ -675,7 +708,11 @@ class ObjectDressup:
         self.boneShapes = []
         blacklisted, inaccessible = self.boneIsBlacklisted(bone)
         enabled = not blacklisted
-        self.bones.append((bone.boneId, bone.location(), enabled, inaccessible))
+        self.bones.append((bone.boneId, bone.location(), enabled, inaccessible, False))
+
+        bone.enabled = enabled
+        bone.accessible = not inaccessible
+        self.boneList.add(bone)
 
         self.boneId = bone.boneId
         if False and PathLog.getLevel(LOG_MODULE) == PathLog.Level.DEBUG and bone.boneId > 2:
@@ -850,6 +887,8 @@ class ObjectDressup:
                 else:
                     PathLog.info("CW -> stay on side")
                 obj.Side = side
+        if not hasattr(self, 'boneList'):
+            self.__init__(obj, obj.Base)
 
         self.toolRadius = 5
         tc = PathDressup.toolController(obj.Base)
@@ -870,18 +909,37 @@ class ObjectDressup:
         # If the receiver was loaded from file, then it never generated the bone list.
         if not hasattr(self, 'bones'):
             self.execute(obj)
-        for (nr, loc, enabled, inaccessible) in self.bones:
-            item = state.get(loc)
-            if item:
-                item[2].append(nr)
+        print('##############')
+        print(len(self.boneList.bonesByLocation))
+        for location, bone in self.boneList.bonesByLocation.items():
+            existing = state.get(bone.location())
+            if existing:
+                existing[3].append(bone.boneId)
             else:
-                state[loc] = (enabled, inaccessible, [nr])
+                state[bone.location()] = (bone.enabled, not bone.accessible, bone.style, [bone.boneId])
+        #for (nr, loc, enabled, inaccessible, style) in self.bones:
+        #    item = state.get(loc)
+        #    if item:
+        #        item[3].append(nr)
+        #    else:
+        #        state[loc] = (enabled, inaccessible, style, [nr])
+        print(len(state))
         return state
 
+    def set_bone_style(self, boneId, style):
+        print ('%s %s' % (boneId, style))
+        self.boneList.bonesByNumber[boneId].style = style
+        #for i, bone in enumerate(self.bones):
+        #    if bone[0] == boneId:
+        #        bone_temp = list(bone)
+        #        bone_temp[4] = style
+        #        self.bones[i] = tuple(bone_temp)
+        #        break
 
 class TaskPanel:
     DataIds = QtCore.Qt.ItemDataRole.UserRole
     DataKey = QtCore.Qt.ItemDataRole.UserRole + 1
+    DataStyle = QtCore.Qt.ItemDataRole.UserRole + 2
 
     def __init__(self, obj):
         self.obj = obj
@@ -915,12 +973,14 @@ class TaskPanel:
             if item.checkState() == QtCore.Qt.CheckState.Unchecked:
                 blacklist.extend(item.data(self.DataIds))
         self.obj.BoneBlacklist = sorted(blacklist)
+        self.obj.boneList = BoneList()
+        print(self.form)
         self.obj.Proxy.execute(self.obj)
 
     def updateBoneList(self):
         itemList = []
-        for loc, (enabled, inaccessible, ids) in PathUtil.keyValueIter(self.obj.Proxy.boneStateList(self.obj)):
-            lbl = '(%.2f, %.2f): %s' % (loc[0], loc[1], ','.join(str(id) for id in ids))
+        for loc, (enabled, inaccessible, style, ids) in PathUtil.keyValueIter(self.obj.Proxy.boneStateList(self.obj)):
+            lbl = '(%.2f, %.2f): %s %s' % (loc[0], loc[1], ','.join(str(id) for id in ids), 'R' if style else 'N')
             item = QtGui.QListWidgetItem(lbl)
             if enabled:
                 item.setCheckState(QtCore.Qt.CheckState.Checked)
@@ -932,10 +992,17 @@ class TaskPanel:
             item.setFlags(flags)
             item.setData(self.DataIds, ids)
             item.setData(self.DataKey, ids[0])
+            item.setData(self.DataStyle, style)
             itemList.append(item)
         self.form.bones.clear()
         for item in sorted(itemList, key=lambda item: item.data(self.DataKey)):
             self.form.bones.addItem(item)
+
+    def set_bone_style(self, item):
+        print ('%s %s' % (item.data(self.DataKey), item.data(self.DataStyle)))
+        self.obj.Proxy.set_bone_style(item.data(self.DataKey), not item.data(self.DataStyle))
+        #self.updateBoneList()
+        self.updateModel()
 
     def updateUI(self):
         customSelected = self.obj.Incision == Incision.Custom
@@ -992,6 +1059,8 @@ class TaskPanel:
         self.form.incisionCombo.currentIndexChanged.connect(self.updateModel)
         self.form.custom.valueChanged.connect(self.updateModel)
         self.form.bones.itemChanged.connect(self.updateModel)
+
+        self.form.bones.itemActivated.connect(self.set_bone_style)
 
 
 class SelObserver:
@@ -1061,6 +1130,7 @@ def Create(base, name='DogboneDressup'):
     '''
     Create(obj, name='DogboneDressup') ... dresses the given PathProfile/PathContour object with dogbones.
     '''
+    print('Create')
     obj = FreeCAD.ActiveDocument.addObject('Path::FeaturePython', name)
     dbo = ObjectDressup(obj, base)
     job = PathUtils.findParentJob(base)
